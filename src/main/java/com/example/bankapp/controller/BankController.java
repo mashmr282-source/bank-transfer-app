@@ -114,12 +114,7 @@ public class BankController {
         }
 
         List<BankTransaction> transactions = bankService.getHistory(accountNumber);
-        BigDecimal totalSent = transactions.stream()
-                .filter(transaction -> transaction.getStatus() == TransactionStatus.SUCCESS)
-                .filter(transaction -> accountNumber.equals(transaction.getFromAccount()))
-                .map(BankTransaction::getAmount)
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
-
+        BigDecimal totalSent = bankService.getTotalSent(accountNumber);
         model.addAttribute("customer", customer);
         model.addAttribute("transactions", transactions);
         model.addAttribute("totalSent", totalSent);
@@ -148,4 +143,54 @@ public class BankController {
             model.addAttribute("customer", new Customer());
         }
     }
+
+    @GetMapping("/large-transfers")
+public String largeTransfers(
+        @RequestParam(name = "min", defaultValue = "10000") BigDecimal min,
+        Model model) {
+    model.addAttribute("min", min);
+    model.addAttribute("transfers", bankService.getLargeTransfers(min));
+    return "large-transfers";
+}
+
+@GetMapping("/deposit")
+public String depositPage(Model model) {
+    model.addAttribute("customers", bankService.getCustomers(null));
+    return "deposit";
+}
+
+@PostMapping("/deposit")
+public String deposit(
+        @RequestParam("accountNumber") String accountNumber,
+        @RequestParam(name = "amount", required = false) BigDecimal amount,
+        RedirectAttributes redirectAttributes) {
+    try {
+        bankService.deposit(accountNumber, amount);
+        redirectAttributes.addFlashAttribute("success", "Deposit completed successfully.");
+    } catch (BankException exception) {
+        redirectAttributes.addFlashAttribute("error", exception.getMessage());
+    }
+    return "redirect:/deposit";
+}
+
+@GetMapping("/withdraw")
+public String withdrawPage(Model model) {
+    model.addAttribute("customers", bankService.getCustomers(null));
+    return "withdraw";
+}
+
+@PostMapping("/withdraw")
+public String withdraw(
+        @RequestParam("accountNumber") String accountNumber,
+        @RequestParam(name = "amount", required = false) BigDecimal amount,
+        RedirectAttributes redirectAttributes) {
+    try {
+        bankService.withdraw(accountNumber, amount);
+        redirectAttributes.addFlashAttribute("success", "Withdrawal completed successfully.");
+    } catch (BankException exception) {
+        redirectAttributes.addFlashAttribute("error", exception.getMessage());
+    }
+    return "redirect:/withdraw";
+} 
+
 }

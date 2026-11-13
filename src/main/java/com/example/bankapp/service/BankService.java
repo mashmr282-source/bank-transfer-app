@@ -13,12 +13,16 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.List;
 
 @Service
 @RequiredArgsConstructor
 @Transactional(readOnly = true)
 public class BankService {
+
+    private static final String FEE_ACCOUNT_NUMBER = "999999";
+    private static final BigDecimal MAX_AMOUNT = new BigDecimal("999999999999.99");
 
     private final CustomerRepository customerRepository;
     private final BankTransactionRepository transactionRepository;
@@ -56,6 +60,16 @@ public class BankService {
         return transactionRepository.countByStatus(status);
     }
 
+    public List<BankTransaction> getLargeTransfers(BigDecimal min) {
+        return transactionRepository.findTransfersAbove(min);
+    }
+
+    public BigDecimal getTotalSent(String accountNumber) {
+        BigDecimal total = transactionRepository.sumSentByAccount(
+                accountNumber, TransactionStatus.SUCCESS);
+        return total == null ? BigDecimal.ZERO : total;
+    }
+
     @Transactional
     public Customer createCustomer(Customer customer) {
         if (customerRepository.countAccounts(customer.getAccountNumber()) > 0) {
@@ -69,12 +83,10 @@ public class BankService {
         return customerRepository.save(customer);
     }
 
-@Transactional(rollbackFor = Exception.class)
+    @Transactional(rollbackFor = Exception.class)
     public BankTransaction transfer(String fromAccount, String toAccount,
                                     BigDecimal amount, boolean simulateFailure) {
-        if (amount == null || amount.signum() <= 0 || amount.scale() > 2) {
-            throw new BankException("Enter a positive amount with up to 2 decimal places");
-        }
+        validateAmount(amount);
 
         if (fromAccount == null || fromAccount.isBlank()
                 || toAccount == null || toAccount.isBlank()) {
@@ -85,11 +97,17 @@ public class BankService {
             throw new BankException("Sender and receiver must be different accounts");
         }
 
+        if (FEE_ACCOUNT_NUMBER.equals(fromAccount) || FEE_ACCOUNT_NUMBER.equals(toAccount)) {
+            throw new BankException("The bank fee account is reserved for collecting fees");
+        }
+
         getCustomer(fromAccount);
         getCustomer(toAccount);
 
-        int debitedRows = customerRepository.debit(fromAccount, amount);
-        if (debitedRows == 0) {
+        BigDecimal fee = amount.movePointLeft(2).setScale(2, RoundingMode.HALF_UP);
+        BigDecimal totalDebit = amount.add(fee);
+
+        if (customerRepository.debit(fromAccount, totalDebit) != 1) {
             throw new InsufficientBalanceException(fromAccount);
         }
 
@@ -97,18 +115,60 @@ public class BankService {
             throw new BankException("Simulated system failure. All changes were rolled back.");
         }
 
-        int creditedRows = customerRepository.credit(toAccount, amount);
-        if (creditedRows != 1) {
+        if (customerRepository.credit(toAccount, amount) != 1) {
             throw new AccountNotFoundException(toAccount);
         }
 
+        if (fee.signum() > 0
+                && customerRepository.credit(FEE_ACCOUNT_NUMBER, fee) != 1) {
+            throw new AccountNotFoundException(FEE_ACCOUNT_NUMBER);
+        }
+
+        return saveSuccessfulTransaction(
+                fromAccount, toAccount, amount,
+                "Transfer completed successfully. Fee: LKR " + fee.toPlainString());
+    }
+
+    @Transactional
+    public void deposit(String accountNumber, BigDecimal amount) {
+        validateAmount(amount);
+        getCustomer(accountNumber);
+
+        if (customerRepository.credit(accountNumber, amount) != 1) {
+            throw new AccountNotFoundException(accountNumber);
+        }
+
+        saveSuccessfulTransaction(null, accountNumber, amount, "Deposit");
+    }
+
+    @Transactional
+    public void withdraw(String accountNumber, BigDecimal amount) {
+        validateAmount(amount);
+        getCustomer(accountNumber);
+
+        if (customerRepository.debit(accountNumber, amount) != 1) {
+            throw new InsufficientBalanceException(accountNumber);
+        }
+
+        saveSuccessfulTransaction(accountNumber, null, amount, "Withdrawal");
+    }
+
+    private void validateAmount(BigDecimal amount) {
+        if (amount == null || amount.signum() <= 0
+                || amount.scale() > 2 || amount.compareTo(MAX_AMOUNT) > 0) {
+            throw new BankException(
+                    "Enter a positive amount with up to 12 digits before the decimal point and 2 after it");
+        }
+    }
+
+    private BankTransaction saveSuccessfulTransaction(String fromAccount, String toAccount,
+                                                      BigDecimal amount, String description) {
         BankTransaction transaction = new BankTransaction();
         transaction.setFromAccount(fromAccount);
         transaction.setToAccount(toAccount);
         transaction.setAmount(amount);
         transaction.setStatus(TransactionStatus.SUCCESS);
-        transaction.setDescription("Transfer completed successfully");
-
+        transaction.setDescription(description);
         return transactionRepository.save(transaction);
     }
 }
